@@ -48,7 +48,7 @@ func TestMetricsBuilder(t *testing.T) {
 			start := pcommon.Timestamp(1_000_000_000)
 			ts := pcommon.Timestamp(1_000_001_000)
 			observedZapCore, observedLogs := observer.New(zap.WarnLevel)
-			settings := receivertest.NewNopSettingsWithType(receivertest.NopType)
+			settings := receivertest.NewNopSettings(receivertest.NopType)
 			settings.Logger = zap.New(observedZapCore)
 			mb := NewMetricsBuilder(loadMetricsBuilderConfig(t, tt.name), settings, WithStartTime(start))
 
@@ -58,6 +58,10 @@ func TestMetricsBuilder(t *testing.T) {
 
 			defaultMetricsCount := 0
 			allMetricsCount := 0
+
+			defaultMetricsCount++
+			allMetricsCount++
+			mb.RecordBuildInfoDataPoint(ts, 1, "version-val")
 
 			defaultMetricsCount++
 			allMetricsCount++
@@ -89,6 +93,21 @@ func TestMetricsBuilder(t *testing.T) {
 			validatedMetrics := make(map[string]bool)
 			for i := 0; i < ms.Len(); i++ {
 				switch ms.At(i).Name() {
+				case "build.info":
+					assert.False(t, validatedMetrics["build.info"], "Found a duplicate in the metrics slice: build.info")
+					validatedMetrics["build.info"] = true
+					assert.Equal(t, pmetric.MetricTypeGauge, ms.At(i).Type())
+					assert.Equal(t, 1, ms.At(i).Gauge().DataPoints().Len())
+					assert.Equal(t, "Build info.", ms.At(i).Description())
+					assert.Equal(t, "{build}", ms.At(i).Unit())
+					dp := ms.At(i).Gauge().DataPoints().At(0)
+					assert.Equal(t, start, dp.StartTimestamp())
+					assert.Equal(t, ts, dp.Timestamp())
+					assert.Equal(t, pmetric.NumberDataPointValueTypeInt, dp.ValueType())
+					assert.Equal(t, int64(1), dp.IntValue())
+					attrVal, ok := dp.Attributes().Get("version")
+					assert.True(t, ok)
+					assert.Equal(t, "version-val", attrVal.Str())
 				case "workflow.jobs.count":
 					assert.False(t, validatedMetrics["workflow.jobs.count"], "Found a duplicate in the metrics slice: workflow.jobs.count")
 					validatedMetrics["workflow.jobs.count"] = true
@@ -105,16 +124,16 @@ func TestMetricsBuilder(t *testing.T) {
 					assert.Equal(t, int64(1), dp.IntValue())
 					attrVal, ok := dp.Attributes().Get("vcs.repository.name")
 					assert.True(t, ok)
-					assert.EqualValues(t, "vcs.repository.name-val", attrVal.Str())
+					assert.Equal(t, "vcs.repository.name-val", attrVal.Str())
 					attrVal, ok = dp.Attributes().Get("ci.github.workflow.job.labels")
 					assert.True(t, ok)
-					assert.EqualValues(t, "ci.github.workflow.job.labels-val", attrVal.Str())
+					assert.Equal(t, "ci.github.workflow.job.labels-val", attrVal.Str())
 					attrVal, ok = dp.Attributes().Get("ci.github.workflow.job.status")
 					assert.True(t, ok)
-					assert.EqualValues(t, "completed", attrVal.Str())
+					assert.Equal(t, "completed", attrVal.Str())
 					attrVal, ok = dp.Attributes().Get("ci.github.workflow.job.conclusion")
 					assert.True(t, ok)
-					assert.EqualValues(t, "success", attrVal.Str())
+					assert.Equal(t, "success", attrVal.Str())
 					attrVal, ok = dp.Attributes().Get("ci.github.workflow.job.head_branch.is_main")
 					assert.True(t, ok)
 					assert.True(t, attrVal.Bool())
@@ -134,16 +153,16 @@ func TestMetricsBuilder(t *testing.T) {
 					assert.Equal(t, int64(1), dp.IntValue())
 					attrVal, ok := dp.Attributes().Get("vcs.repository.name")
 					assert.True(t, ok)
-					assert.EqualValues(t, "vcs.repository.name-val", attrVal.Str())
+					assert.Equal(t, "vcs.repository.name-val", attrVal.Str())
 					attrVal, ok = dp.Attributes().Get("ci.github.workflow.run.labels")
 					assert.True(t, ok)
-					assert.EqualValues(t, "ci.github.workflow.run.labels-val", attrVal.Str())
+					assert.Equal(t, "ci.github.workflow.run.labels-val", attrVal.Str())
 					attrVal, ok = dp.Attributes().Get("ci.github.workflow.run.status")
 					assert.True(t, ok)
-					assert.EqualValues(t, "completed", attrVal.Str())
+					assert.Equal(t, "completed", attrVal.Str())
 					attrVal, ok = dp.Attributes().Get("ci.github.workflow.run.conclusion")
 					assert.True(t, ok)
-					assert.EqualValues(t, "success", attrVal.Str())
+					assert.Equal(t, "success", attrVal.Str())
 					attrVal, ok = dp.Attributes().Get("ci.github.workflow.run.head_branch.is_main")
 					assert.True(t, ok)
 					assert.True(t, attrVal.Bool())
