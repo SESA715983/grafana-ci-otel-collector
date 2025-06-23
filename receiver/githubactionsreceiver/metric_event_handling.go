@@ -1,6 +1,7 @@
 package githubactionsreceiver
 
 import (
+	"fmt"
 	"sort"
 	"strings"
 	"sync"
@@ -21,6 +22,8 @@ type metricsHandler struct {
 	mb       *metadata.MetricsBuilder
 	cfg      *Config
 	logger   *zap.Logger
+	// Track what we've recorded in current emission to prevent duplicates
+	recordedInThisEmission sync.Map // key: string, value: bool
 }
 
 var repoMap = sync.Map{}
@@ -46,7 +49,16 @@ func newMetricsHandler(settings receiver.Settings, cfg *Config, logger *zap.Logg
 }
 
 func (m *metricsHandler) workflowJobEventToMetrics(event *github.WorkflowJobEvent) pmetric.Metrics {
+	if event == nil || event.GetRepo() == nil || event.GetWorkflowJob() == nil {
+		m.logger.Debug("Received nil event or missing required fields")
+		return m.mb.Emit()
+	}
+
 	repo := event.GetRepo().GetFullName()
+	if repo == "" {
+		m.logger.Debug("Repository name is empty")
+		return m.mb.Emit()
+	}
 
 	labels := ""
 	if len(event.GetWorkflowJob().Labels) > 0 {
@@ -88,38 +100,53 @@ func (m *metricsHandler) workflowJobEventToMetrics(event *github.WorkflowJobEven
 	defaultBranch := event.GetRepo().DefaultBranch
 	var isMain bool
 
-	if event.GetWorkflowJob().GetHeadBranch() == *defaultBranch {
+	if defaultBranch != nil && event.GetWorkflowJob().GetHeadBranch() == *defaultBranch {
 		isMain = true
 	}
 
-	if actionOk {
+	// Validate required fields before recording metrics
+	if actionOk && repo != "" && status.String() != "" && conclusion.String() != "" {
 		curVal, found := loadFromCache(repo, labels, status, conclusion)
 
-		// If the value was not found in the cache, we record a 0 value for all other possible statuses
-		// so that all counters for a given labels combination are always present and reset at the same time.
-		if !found {
-			for _, s := range metadata.MapAttributeCiGithubWorkflowJobStatus {
-				for _, c := range metadata.MapAttributeCiGithubWorkflowJobConclusion {
-					if s == status && c == conclusion {
-						continue
+		metricKey := fmt.Sprintf("job:%s:%s:%s:%s:%t", repo, labels, status.String(), conclusion.String(), isMain)
+
+		if _, alreadyRecorded := m.recordedInThisEmission.LoadOrStore(metricKey, true); !alreadyRecorded {
+			if !found {
+				for _, s := range metadata.MapAttributeCiGithubWorkflowJobStatus {
+					for _, c := range metadata.MapAttributeCiGithubWorkflowJobConclusion {
+						if s == status && c == conclusion {
+							continue
+						}
+						storeInCache(repo, labels, s, c, 0)
+						otherKey := fmt.Sprintf("job:%s:%s:%s:%s:%t", repo, labels, s.String(), c.String(), isMain)
+						if _, recorded := m.recordedInThisEmission.LoadOrStore(otherKey, true); !recorded {
+							m.mb.RecordWorkflowJobsCountDataPoint(now, 0, repo, labels, s, c, isMain)
+						}
 					}
-
-					storeInCache(repo, labels, s, c, 0)
-					m.mb.RecordWorkflowJobsCountDataPoint(now, 0, repo, labels, s, c, isMain)
 				}
-
 			}
+			storeInCache(repo, labels, status, conclusion, curVal+1)
+			m.mb.RecordWorkflowJobsCountDataPoint(now, curVal+1, repo, labels, status, conclusion, isMain)
 		}
-
-		storeInCache(repo, labels, status, conclusion, curVal+1)
-		m.mb.RecordWorkflowJobsCountDataPoint(now, curVal+1, repo, labels, status, conclusion, isMain)
 	}
 
-	return m.mb.Emit()
+	result := m.mb.Emit()
+	// Clear the recorded tracking for next emission
+	m.recordedInThisEmission = sync.Map{}
+	return result
 }
 
 func (m *metricsHandler) workflowRunEventToMetrics(event *github.WorkflowRunEvent) pmetric.Metrics {
+	if event == nil || event.GetRepo() == nil || event.GetWorkflowRun() == nil {
+		m.logger.Debug("Received nil event or missing required fields")
+		return m.mb.Emit()
+	}
+
 	repo := event.GetRepo().GetFullName()
+	if repo == "" {
+		m.logger.Debug("Repository name is empty")
+		return m.mb.Emit()
+	}
 
 	m.logger.Debug("Processing workflow_run event",
 		zap.String("repo", repo),
@@ -141,34 +168,40 @@ func (m *metricsHandler) workflowRunEventToMetrics(event *github.WorkflowRunEven
 	defaultBranch := event.GetRepo().DefaultBranch
 	var isMain bool
 
-	if event.GetWorkflowRun().GetHeadBranch() == *defaultBranch {
+	if defaultBranch != nil && event.GetWorkflowRun().GetHeadBranch() == *defaultBranch {
 		isMain = true
 	}
 
-	if actionOk {
+	// Validate required fields before recording metrics
+	if actionOk && repo != "" && status.String() != "" && conclusion.String() != "" {
 		curVal, found := loadFromCache(repo, "default", status, conclusion)
 
-		// If the value was not found in the cache, we record a 0 value for all other possible statuses
-		// so that all counters for a given labels combination are always present and reset at the same time.
-		if !found {
-			for _, s := range metadata.MapAttributeCiGithubWorkflowRunStatus {
-				for _, c := range metadata.MapAttributeCiGithubWorkflowRunConclusion {
-					if s == status && c == conclusion {
-						continue
+		metricKey := fmt.Sprintf("run:%s:%s:%s:%s:%t", repo, "default", status.String(), conclusion.String(), isMain)
+
+		if _, alreadyRecorded := m.recordedInThisEmission.LoadOrStore(metricKey, true); !alreadyRecorded {
+			if !found {
+				for _, s := range metadata.MapAttributeCiGithubWorkflowRunStatus {
+					for _, c := range metadata.MapAttributeCiGithubWorkflowRunConclusion {
+						if s == status && c == conclusion {
+							continue
+						}
+						storeInCache(repo, "default", s, c, 0)
+						otherKey := fmt.Sprintf("run:%s:%s:%s:%s:%t", repo, "default", s.String(), c.String(), isMain)
+						if _, recorded := m.recordedInThisEmission.LoadOrStore(otherKey, true); !recorded {
+							m.mb.RecordWorkflowRunsCountDataPoint(now, 0, repo, "default", s, c, isMain)
+						}
 					}
-
-					storeInCache(repo, "default", s, c, 0)
-					m.mb.RecordWorkflowRunsCountDataPoint(now, 0, repo, "default", s, c, isMain)
 				}
-
 			}
+			storeInCache(repo, "default", status, conclusion, curVal+1)
+			m.mb.RecordWorkflowRunsCountDataPoint(now, curVal+1, repo, "default", status, conclusion, isMain)
 		}
-
-		storeInCache(repo, "default", status, conclusion, curVal+1)
-		m.mb.RecordWorkflowRunsCountDataPoint(now, curVal+1, repo, "default", status, conclusion, isMain)
 	}
 
-	return m.mb.Emit()
+	result := m.mb.Emit()
+	// Clear the recorded tracking for next emission
+	m.recordedInThisEmission = sync.Map{}
+	return result
 }
 
 func storeInCache(repo, labels string, status interface{}, conclusion interface{}, value int64) {
